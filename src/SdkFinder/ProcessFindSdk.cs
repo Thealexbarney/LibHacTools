@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using LibHac;
@@ -18,8 +20,9 @@ namespace SdkFinder
         private Context Context { get; }
         private Keyset Keyset { get; }
         private FileSystemClient FsClient { get; }
-        private HashSet<Buffer32> ProcessedBuildIds { get; } = new HashSet<Buffer32>();
-        private byte[] Buffer { get; } = new byte[1024 * 1024 * 10];
+        private List<NsoSet> NsoSets { get; } = new List<NsoSet>();
+        private Dictionary<Buffer32, NsoInfo> Nsos { get; } = new Dictionary<Buffer32, NsoInfo>();
+        private byte[] Buffer { get; } = new byte[1024 * 1024 * 20];
 
         public ProcessSearchSdk(Context ctx)
         {
@@ -83,6 +86,9 @@ namespace SdkFinder
                     }
                 }
             }
+
+            CalculateVersions();
+            RenameOutput();
 
             FsClient.Unmount("search");
             FsClient.Unmount("out");
@@ -150,11 +156,7 @@ namespace SdkFinder
             {
                 IFileSystem codeFs = nca.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
 
-                Result rc = codeFs.OpenFile(out IFile sdkFile, "/sdk", OpenMode.Read);
-                if (rc.IsSuccess())
-                {
-                    ProcessSdk(sdkFile);
-                }
+                ProcessCodeFs(codeFs);
             }
 
             if (nca.CanOpenSection(NcaSectionType.Data))
@@ -168,55 +170,166 @@ namespace SdkFinder
                     foreach (DirectoryEntryEx fileEntry in dataFs.EnumerateEntries("/", "sdk",
                         SearchOptions.RecurseSubdirectories))
                     {
-                        Result rc = dataFs.OpenFile(out IFile sdkFile, fileEntry.FullPath, OpenMode.Read);
-                        if (rc.IsSuccess())
-                        {
-                            ProcessSdk(sdkFile);
-                        }
+                        string dir = PathTools.GetParentDirectory(fileEntry.FullPath);
+
+                        SubdirectoryFileSystem.CreateNew(out SubdirectoryFileSystem subFs, dataFs, dir.ToU8Span())
+                            .ThrowIfFailure();
+
+                        ProcessCodeFs(subFs);
                     }
                 }
             }
         }
 
-        private void ProcessSdk(IFile sdkFile)
+        private void ProcessCodeFs(IFileSystem fs)
         {
-            var nso = new Nso(sdkFile.AsStorage());
-            byte[] buildId = nso.BuildId;
+            var nsos = new List<IFile>();
 
-            if (!ProcessedBuildIds.Add(Unsafe.As<byte, Buffer32>(ref buildId[0])))
-                return;
-
-            string fileName;
-
-            if (TryGetVersion(nso, out string version))
+            foreach (DirectoryEntryEx fileEntry in fs.EnumerateEntries("/", "rtld",
+                SearchOptions.RecurseSubdirectories))
             {
-                fileName = $"out:/{version}_{buildId.ToHexString()}";
-            }
-            else
-            {
-                fileName = $"out:/{buildId.ToHexString()}";
+                Result rc = fs.OpenFile(out IFile nsoFile, fileEntry.FullPath, OpenMode.Read);
+                if (rc.IsSuccess())
+                {
+                    nsos.Add(nsoFile);
+                }
             }
 
-            Result rc = FsClient.GetEntryType(out _, fileName);
-            if (rc.IsSuccess()) return;
+            foreach (DirectoryEntryEx fileEntry in fs.EnumerateEntries("/", "*sdk*",
+                SearchOptions.RecurseSubdirectories))
+            {
+                Result rc = fs.OpenFile(out IFile nsoFile, fileEntry.FullPath, OpenMode.Read);
+                if (rc.IsSuccess())
+                {
+                    nsos.Add(nsoFile);
+                }
+            }
 
-            sdkFile.GetSize(out long sdkSize).ThrowIfFailure();
-            Span<byte> sdkBytes = Buffer.AsSpan(0, (int)sdkSize);
-
-            sdkFile.Read(out long bytesRead, 0, sdkBytes).ThrowIfFailure();
-            if (bytesRead != sdkSize) return;
-
-            FsClient.CreateFile(fileName, sdkSize).ThrowIfFailure();
-            FsClient.OpenFile(out FileHandle outFile, fileName, OpenMode.Write).ThrowIfFailure();
-
-            FsClient.WriteFile(outFile, 0, sdkBytes, WriteOption.Flush);
-            FsClient.CloseFile(outFile);
+            ProcessNsoSet(nsos);
         }
 
-        private bool TryGetVersion(Nso nso, out string version)
+        private void ProcessNsoSet(List<IFile> list)
+        {
+            if (list.Count == 0) return;
+
+            var nsos = new List<(Nso nso, IFile file)>();
+
+            foreach (IFile file in list)
+            {
+                var nso = new Nso(file.AsStorage());
+                nsos.Add((nso, file));
+            }
+
+            var nsoInfos = new List<NsoInfo>();
+            foreach ((Nso nso, IFile file) nso in nsos)
+            {
+                try
+                {
+                    nsoInfos.Add(GetNsoInfo(nso));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error processing {nso.nso.BuildId.ToHexString()}");
+                    Console.WriteLine(ex);
+                }
+            }
+
+            var set = new NsoSet();
+            set.Nsos.AddRange(nsoInfos);
+            NsoSets.Add(set);
+
+            Version maxVersion = set.Nsos.Where(x => x.Version != null).Select(x => x.Version).Max();
+
+            if (maxVersion != null)
+            {
+                NsoInfo maxInfo = set.Nsos.First(x => x.Version == maxVersion);
+
+                set.Version = maxVersion;
+                set.MaxVersionNso = maxInfo;
+            }
+
+            foreach (NsoInfo info in nsoInfos)
+            {
+                info.Sets.Add(set);
+            }
+        }
+
+        private NsoInfo GetNsoInfo((Nso nso, IFile file) nso)
+        {
+            Buffer32 buildId = Unsafe.As<byte, Buffer32>(ref nso.nso.BuildId[0]);
+
+            if (!Nsos.TryGetValue(buildId, out NsoInfo info))
+            {
+                info = CreateNsoInfo(nso.nso);
+                Nsos.Add(buildId, info);
+
+                string fileName = $"out:/{buildId.ToString()}";
+
+                nso.file.GetSize(out long nsoSize).ThrowIfFailure();
+                Span<byte> nsoBytes = Buffer.AsSpan(0, (int)nsoSize);
+
+                nso.file.Read(out long bytesRead, 0, nsoBytes).ThrowIfFailure();
+                if (bytesRead != nsoSize) throw new InvalidDataException("Read incorrect number of bytes");
+
+                FsClient.DeleteFile(fileName);
+                FsClient.CreateFile(fileName, nsoSize).ThrowIfFailure();
+                FsClient.OpenFile(out FileHandle outFile, fileName, OpenMode.Write).ThrowIfFailure();
+
+                FsClient.WriteFile(outFile, 0, nsoBytes, WriteOption.Flush).ThrowIfFailure();
+                FsClient.CloseFile(outFile);
+            }
+
+            return info;
+        }
+
+        private string GetName(Nso nso)
         {
             byte[] rodata = nso.Sections[1].DecompressSection();
-            byte[] search = Encoding.ASCII.GetBytes("NintendoSdk_nnSdk-");
+
+            if (rodata.Length < 9)
+                return string.Empty;
+
+            return StringUtils.Utf8ZToString(rodata.AsSpan(8));
+        }
+
+        private NsoInfo CreateNsoInfo(Nso nso)
+        {
+            var info = new NsoInfo();
+
+            info.BuildId = Unsafe.As<byte, Buffer32>(ref nso.BuildId[0]);
+            info.Name = GetName(nso);
+
+            if (!TryGetBuildString(nso, out string buildString))
+            {
+                return info;
+            }
+
+            info.BuildString = buildString;
+
+            string[] buildSplit = buildString.Split('-');
+            if (buildSplit.Length != 3)
+            {
+                throw new InvalidDataException($"Unknown build string format {buildString}");
+            }
+
+            info.VersionString = buildSplit[1];
+            info.BuildType = buildSplit[2];
+
+            string[] versionSplit = info.VersionString.Split('_');
+            if (versionSplit.Length != 3)
+            {
+                throw new InvalidDataException($"Unknown version string format {info.VersionString}");
+            }
+
+            info.Version = new Version(int.Parse(versionSplit[0]), int.Parse(versionSplit[1]), int.Parse(versionSplit[2]));
+
+            return info;
+        }
+
+        private bool TryGetBuildString(Nso nso, out string buildString)
+        {
+            byte[] rodata = nso.Sections[1].DecompressSection();
+            byte[] search = Encoding.ASCII.GetBytes("SDK MW");
             int searchLen = search.Length;
 
             for (int i = rodata.Length - searchLen; i > 0; i--)
@@ -225,13 +338,55 @@ namespace SdkFinder
 
                 if (data.SequenceEqual(search))
                 {
-                    version = StringUtils.Utf8ZToString(rodata.AsSpan(i + searchLen));
+                    buildString = StringUtils.Utf8ZToString(rodata.AsSpan(i));
                     return true;
                 }
             }
 
-            version = default;
+            buildString = default;
             return false;
+        }
+
+        private void CalculateVersions()
+        {
+            foreach (NsoInfo nso in Nsos.Values.Where(x => x.BuildString == null))
+            {
+                Version version = nso.Sets.Where(x => x.Version != null).Select(x => x.Version).Min();
+
+                if (version != null)
+                {
+                    NsoInfo versionInfo = nso.Sets.First(x => x.Version == version).MaxVersionNso;
+
+                    nso.VersionString = versionInfo.VersionString;
+                    nso.Version = versionInfo.Version;
+                    nso.BuildType = versionInfo.BuildType;
+                }
+            }
+        }
+
+        private void RenameOutput()
+        {
+            foreach (NsoInfo nso in Nsos.Values)
+            {
+                string oldName = $"out:/{nso.BuildId.ToString()}";
+                string newName;
+
+                string shortBuildId = nso.BuildId.ToString().Substring(0, 8);
+                if (nso.VersionString != null)
+                {
+                    newName = $"out:/{nso.Name}-{nso.VersionString}-{nso.BuildType}-{shortBuildId}.nso";
+                }
+                else
+                {
+                    newName = $"out:/{nso.Name}-{shortBuildId}.nso";
+                }
+
+                Result rc = FsClient.RenameFile(oldName, newName);
+                if (rc.IsFailure())
+                {
+                    Context.Logger.LogMessage($"Error {rc.ToStringWithName()} renaming {oldName} to {newName}");
+                }
+            }
         }
 
         private void ImportTickets(IFileSystem fs)
@@ -246,6 +401,36 @@ namespace SdkFinder
 
                     Keyset.ExternalKeySet.Add(new RightsId(ticket.RightsId), new AccessKey(ticket.GetTitleKey(Keyset)));
                 }
+            }
+        }
+
+        [DebuggerDisplay("{" + nameof(Version) + "}")]
+        private class NsoSet
+        {
+            public List<NsoInfo> Nsos { get; } = new List<NsoInfo>();
+            public Version Version { get; set; }
+            public NsoInfo MaxVersionNso { get; set; }
+        }
+
+        [DebuggerDisplay("{" + nameof(GetDisplay) + "()}")]
+        private class NsoInfo
+        {
+            public Buffer32 BuildId;
+            public string Name { get; set; }
+            public string BuildString { get; set; }
+            public string VersionString { get; set; }
+            public Version Version { get; set; }
+            public string BuildType { get; set; }
+            public List<NsoSet> Sets { get; set; } = new List<NsoSet>();
+
+            public string GetDisplay()
+            {
+                if (VersionString == null)
+                {
+                    return Name;
+                }
+
+                return $"{Name} {VersionString}-{BuildType}";
             }
         }
     }
