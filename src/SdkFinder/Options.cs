@@ -36,6 +36,7 @@ namespace SdkFinder
     {
         public Options Options;
         public Keyset Keyset;
+        public Keyset DevKeyset;
         public ProgressBar Logger;
         public Horizon Horizon;
     }

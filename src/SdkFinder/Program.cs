@@ -95,10 +95,9 @@ namespace SdkFinder
 
         private static void OpenKeyset(Context ctx)
         {
-            string keyFileName = ctx.Options.UseDevKeys ? "dev.keys" : "prod.keys";
-
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string homeKeyFile = Path.Combine(home, ".switch", keyFileName);
+            string homeKeyFile = Path.Combine(home, ".switch", "prod.keys");
+            string homeDevKeyFile = Path.Combine(home, ".switch", "dev.keys");
             string homeTitleKeyFile = Path.Combine(home, ".switch", "title.keys");
             string homeConsoleKeyFile = Path.Combine(home, ".switch", "console.keys");
             string keyFile = ctx.Options.Keyfile;
@@ -120,10 +119,19 @@ namespace SdkFinder
                 consoleKeyFile = homeConsoleKeyFile;
             }
 
-            ctx.Keyset = ExternalKeyReader.ReadKeyFile(keyFile, titleKeyFile, consoleKeyFile, ctx.Logger, ctx.Options.UseDevKeys);
+            ctx.Keyset = ExternalKeyReader.ReadKeyFile(keyFile, titleKeyFile, consoleKeyFile, ctx.Logger);
             if (ctx.Options.SdSeed != null)
             {
                 ctx.Keyset.SetSdSeed(ctx.Options.SdSeed.ToBytes());
+            }
+
+            if (File.Exists(homeDevKeyFile))
+            {
+                ctx.DevKeyset = ExternalKeyReader.ReadKeyFile(homeDevKeyFile, titleKeyFile, consoleKeyFile, ctx.Logger, true);
+                if (ctx.Options.SdSeed != null)
+                {
+                    ctx.DevKeyset.SetSdSeed(ctx.Options.SdSeed.ToBytes());
+                }
             }
         }
     }

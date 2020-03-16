@@ -19,6 +19,7 @@ namespace SdkFinder
     {
         private Context Context { get; }
         private Keyset Keyset { get; }
+        private Keyset DevKeyset { get; }
         private FileSystemClient FsClient { get; }
         private List<NsoSet> NsoSets { get; } = new List<NsoSet>();
         private Dictionary<Buffer32, NsoInfo> Nsos { get; } = new Dictionary<Buffer32, NsoInfo>();
@@ -28,6 +29,7 @@ namespace SdkFinder
         {
             Context = ctx;
             Keyset = ctx.Keyset;
+            DevKeyset = ctx.DevKeyset;
             FsClient = ctx.Horizon.Fs;
         }
 
@@ -129,7 +131,7 @@ namespace SdkFinder
 
             using (var ncaStorage = new FileHandleStorage(ncaHandle, true))
             {
-                var nca = new Nca(Keyset, ncaStorage);
+                Nca nca = OpenNca(ncaStorage);
 
                 ProcessNca(nca);
             }
@@ -144,10 +146,21 @@ namespace SdkFinder
                 Result rc = ncaFs.OpenFile(out IFile ncaFile, fileEntry.FullPath, OpenMode.Read);
                 if (rc.IsFailure()) continue;
 
-                var nca = new Nca(Keyset, ncaFile.AsStorage());
+                Nca nca = OpenNca(ncaFile.AsStorage());
 
                 ProcessNca(nca);
             }
+        }
+
+        private Nca OpenNca(IStorage ncaStorage)
+        {
+            try
+            {
+                return new Nca(Keyset, ncaStorage);
+            }
+            catch (InvalidDataException) { }
+
+            return new Nca(DevKeyset, ncaStorage);
         }
 
         private void ProcessNca(Nca nca)
