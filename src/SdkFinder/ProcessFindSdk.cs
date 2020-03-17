@@ -47,43 +47,37 @@ namespace SdkFinder
             FsClient.Register("search".ToU8Span(), localFs);
             FsClient.Register("out".ToU8Span(), outFs);
 
-            FsClient.OpenDirectory(out DirectoryHandle rootDir, "search:/", OpenDirectoryMode.File);
-            using (rootDir)
+            IEnumerable<DirectoryEntryEx> entries = FsClient.EnumerateEntries("search:/", "*.xci",
+                    SearchOptions.CaseInsensitive | SearchOptions.RecurseSubdirectories)
+                .Concat(FsClient.EnumerateEntries("search:/", "*.nsp",
+                    SearchOptions.CaseInsensitive | SearchOptions.RecurseSubdirectories))
+                .Concat(FsClient.EnumerateEntries("search:/", "*.nca",
+                    SearchOptions.CaseInsensitive | SearchOptions.RecurseSubdirectories));
             {
-                var entry = new DirectoryEntry();
-
-                string fileName = string.Empty;
-
-                while (true)
+                foreach (DirectoryEntryEx entry in entries)
                 {
                     try
                     {
-                        FsClient.ReadDirectory(out long entriesRead, SpanHelpers.AsSpan(ref entry), rootDir);
+                        Context.Logger.LogMessage(entry.FullPath);
 
-                        if (entriesRead == 0)
-                            break;
-
-                        fileName = StringUtils.Utf8ZToString(entry.Name);
-                        Context.Logger.LogMessage(fileName);
-
-                        string extension = Path.GetExtension(fileName);
+                        string extension = Path.GetExtension(entry.Name);
 
                         if (extension.ToLower() == ".xci")
                         {
-                            ProcessXci($"search:/{fileName}");
+                            ProcessXci(entry.FullPath);
                         }
                         else if (extension.ToLower() == ".nsp")
                         {
-                            ProcessNsp($"search:/{fileName}");
+                            ProcessNsp(entry.FullPath);
                         }
                         else if (extension.ToLower() == ".nca")
                         {
-                            ProcessNcaFile($"search:/{fileName}");
+                            ProcessNcaFile(entry.FullPath);
                         }
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error processing {fileName}");
+                        Console.WriteLine($"Error processing {entry.FullPath}");
                         Console.WriteLine(ex);
                     }
                 }
