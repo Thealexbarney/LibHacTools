@@ -400,7 +400,21 @@ namespace SdkFinder
             if (rodata.Length < 9)
                 return string.Empty;
 
-            return StringUtils.Utf8ZToString(rodata.AsSpan(8));
+            return AsciiZToString(rodata.AsSpan(8));
+        }
+
+        private static string AsciiZToString(ReadOnlySpan<byte> bytes)
+        {
+            int len = 0;
+
+            while (len < bytes.Length && IsPrintableAscii(bytes[len]))
+            {
+                len++;
+            }
+
+            return Encoding.UTF8.GetString(bytes.Slice(0, len));
+
+            static bool IsPrintableAscii(byte c) => c >= 0x20 && c < 0x7f;
         }
 
         private NsoInfo CreateNsoInfo(Nso nso)
@@ -449,7 +463,7 @@ namespace SdkFinder
 
                 if (data.SequenceEqual(search))
                 {
-                    buildString = StringUtils.Utf8ZToString(rodata.AsSpan(i));
+                    buildString = AsciiZToString(rodata.AsSpan(i));
                     return true;
                 }
             }
