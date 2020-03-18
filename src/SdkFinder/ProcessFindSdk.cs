@@ -52,6 +52,8 @@ namespace SdkFinder
                 .Concat(FsClient.EnumerateEntries("search:/", "*.nsp",
                     SearchOptions.CaseInsensitive | SearchOptions.RecurseSubdirectories))
                 .Concat(FsClient.EnumerateEntries("search:/", "*.nca",
+                    SearchOptions.CaseInsensitive | SearchOptions.RecurseSubdirectories))
+                .Concat(FsClient.EnumerateEntries("search:/", "*.nso",
                     SearchOptions.CaseInsensitive | SearchOptions.RecurseSubdirectories));
             {
                 foreach (DirectoryEntryEx entry in entries)
@@ -73,6 +75,10 @@ namespace SdkFinder
                         else if (extension.ToLower() == ".nca")
                         {
                             ProcessNcaFile(entry.FullPath);
+                        }
+                        else if (extension.ToLower() == ".nso")
+                        {
+                            ProcessNso(entry.FullPath);
                         }
                     }
                     catch (Exception ex)
@@ -144,6 +150,43 @@ namespace SdkFinder
 
                 ProcessNca(nca);
             }
+        }
+
+        private void ProcessNso(string nsoPath)
+        {
+            FsClient.OpenFile(out FileHandle nsoHandle, nsoPath, OpenMode.Read).ThrowIfFailure();
+
+            using (nsoHandle)
+            using (var nsoStorage = new FileHandleStorage(nsoHandle, true))
+            using (var nsoFile = new StorageFile(nsoStorage, OpenMode.Read))
+            {
+                var nso = new Nso(nsoStorage);
+                NsoInfo info = GetNsoInfo((nso, nsoFile));
+
+                ParseNsoName(nsoPath, info);
+            }
+        }
+
+        // Import version data from the filename if needed
+        private void ParseNsoName(string fileName, NsoInfo info)
+        {
+            if (Path.GetExtension(fileName) != ".nso")
+                return;
+
+            string[] splitName = Path.GetFileNameWithoutExtension(fileName).Split('-');
+            if (splitName.Length != 4)
+                return;
+
+            string name = splitName[0];
+            string version = splitName[1];
+            string buildType = splitName[2];
+            string id = splitName[3];
+
+            if (name != info.Name || id != info.ShortBuildId)
+                return;
+
+            info.VersionString = version;
+            info.BuildType = buildType;
         }
 
         private Nca OpenNca(IStorage ncaStorage)
@@ -378,7 +421,7 @@ namespace SdkFinder
                 string oldName = $"out:/{nso.BuildId.ToString()}";
                 string newName;
 
-                string shortBuildId = nso.BuildId.ToString().Substring(0, 8);
+                string shortBuildId = nso.ShortBuildId;
                 if (nso.VersionString != null)
                 {
                     newName = $"out:/{nso.Name}-{nso.VersionString}-{nso.BuildType}-{shortBuildId}.nso";
@@ -429,6 +472,8 @@ namespace SdkFinder
             public Version Version { get; set; }
             public string BuildType { get; set; }
             public List<NsoSet> Sets { get; set; } = new List<NsoSet>();
+
+            public string ShortBuildId => BuildId.ToString().Substring(0, 8);
 
             public string GetDisplay()
             {
