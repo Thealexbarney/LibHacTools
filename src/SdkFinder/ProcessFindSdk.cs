@@ -23,6 +23,7 @@ namespace SdkFinder
         private FileSystemClient FsClient { get; }
         private List<NsoSet> NsoSets { get; } = new List<NsoSet>();
         private Dictionary<Buffer32, NsoInfo> Nsos { get; } = new Dictionary<Buffer32, NsoInfo>();
+        private HashSet<string> LooseNsoSetsProcessed { get; } = new HashSet<string>();
         private byte[] Buffer { get; } = new byte[1024 * 1024 * 20];
 
         public ProcessSearchSdk(Context ctx)
@@ -78,7 +79,22 @@ namespace SdkFinder
                         }
                         else if (extension.ToLower() == ".nso")
                         {
-                            ProcessNso(entry.FullPath);
+                            string parentDirectory = PathTools.GetParentDirectory(entry.FullPath);
+
+                            // Don't process sets multiple times
+                            if (LooseNsoSetsProcessed.Contains(parentDirectory))
+                                continue;
+
+                            if (IsNsoSetDirectory(parentDirectory))
+                            {
+                                ProcessNsoSetDirectory(parentDirectory);
+                                LooseNsoSetsProcessed.Add(parentDirectory);
+                            }
+                            else
+                            {
+                                ProcessNso(entry.FullPath);
+
+                            }
                         }
                     }
                     catch (Exception ex)
@@ -330,6 +346,51 @@ namespace SdkFinder
             }
 
             return info;
+        }
+
+        private bool IsNsoSetDirectory(string path)
+        {
+            Result rc = FsClient.GetEntryType(out DirectoryEntryType type, $"{path}/nnSdk.nso");
+
+            if (rc.IsFailure() || type != DirectoryEntryType.File)
+                return false;
+
+            rc = FsClient.GetEntryType(out type, $"{path}/nnrtld.nso");
+
+            if (rc.IsFailure() || type != DirectoryEntryType.File)
+                return false;
+
+            return true;
+        }
+
+        private void ProcessNsoSetDirectory(string path)
+        {
+            var handles = new List<FileHandle>();
+            var nsoFiles = new List<IFile>();
+            try
+            {
+                foreach (DirectoryEntryEx fileEntry in FsClient.EnumerateEntries(path, "*.nso"))
+                {
+                    Result rc = FsClient.OpenFile(out FileHandle nsoHandle, fileEntry.FullPath, OpenMode.Read);
+
+                    if (rc.IsSuccess())
+                    {
+                        var file = new StorageFile(new FileHandleStorage(nsoHandle, true), OpenMode.Read);
+
+                        handles.Add(nsoHandle);
+                        nsoFiles.Add(file);
+                    }
+                }
+
+                ProcessNsoSet(nsoFiles);
+            }
+            finally
+            {
+                foreach (FileHandle handle in handles)
+                {
+                    FsClient.CloseFile(handle);
+                }
+            }
         }
 
         private string GetName(Nso nso)
