@@ -194,15 +194,27 @@ namespace SdkFinder
                 return;
 
             string name = splitName[0];
-            string version = splitName[1];
+            string versionString = splitName[1];
             string buildType = splitName[2];
             string id = splitName[3];
 
             if (name != info.Name || id != info.ShortBuildId)
                 return;
 
-            info.VersionString = version;
+            string[] versionSplit = versionString.Split('_');
+            if (versionSplit.Length != 3)
+            {
+                throw new InvalidDataException($"Unknown version string format {versionString}");
+            }
+
+            var version = new Version(int.Parse(versionSplit[0]), int.Parse(versionSplit[1]), int.Parse(versionSplit[2]));
+
+            if (info.Version != null && info.Version <= version)
+                return;
+
+            info.VersionString = versionString;
             info.BuildType = buildType;
+            info.Version = version;
         }
 
         private Nca OpenNca(IStorage ncaStorage)
